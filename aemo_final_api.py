@@ -154,19 +154,6 @@ def validate_discovery_params(body: dict) -> list:
             if "houseNumberSuffix" not in body:
                 body["houseNumberSuffix"] = m.group(2).upper()
 
-    # Auto-format street type to AEMO's max 4 char abbreviation
-    if "streetType" in body and isinstance(body["streetType"], str):
-        st_val = body["streetType"].strip().upper()
-        mapping = {
-            "STREET": "ST", "ROAD": "RD", "AVENUE": "AVE", "DRIVE": "DR",
-            "COURT": "CT", "LANE": "LN", "PLACE": "PL", "PARADE": "PDE",
-            "CRESCENT": "CR", "BOULEVARD": "BVD", "TERRACE": "TCE",
-            "HIGHWAY": "HWY", "SQUARE": "SQ", "GROVE": "GR", "WAY": "WAY",
-            "CIRCUIT": "CCT", "CLOSE": "CL"
-        }
-        body["streetType"] = mapping.get(st_val, st_val[:4])
-
-
     errors = []
     if not body.get("jurisdictionCode"):
         errors.append("jurisdictionCode is required (e.g. 'SA', 'NSW', 'VIC').")
@@ -343,7 +330,6 @@ def parse_discovery_xml(xml_text):
 
         address = {
             "houseNumber":             find_in(block, "HouseNumber"),
-            "houseNumberSuffix":       find_in(block, "HouseNumberSuffix"),
             "flatOrUnitNumber":        find_in(block, "FlatOrUnitNumber"),
             "streetName":              find_in(block, "StreetName"),
             "streetType":              find_in(block, "StreetType"),
@@ -352,7 +338,6 @@ def parse_discovery_xml(xml_text):
             "state":                   find_in(block, "StateOrTerritory"),
             "postcode":                find_in(block, "PostCode"),
             "deliveryPointIdentifier": find_in(block, "DeliveryPointIdentifier"),
-            "lotNumber":               find_in(block, "LotNumber"),
         }
 
         nmi_status    = find_in(block, "Status")
@@ -368,22 +353,16 @@ def parse_discovery_xml(xml_text):
             "address":          address,
         })
         addr_parts = [
-            address.get("flatOrUnitNumber"),
-            address.get("houseNumber") and f"{address['houseNumber']}{address.get('houseNumberSuffix', '')}",
-            address.get("lotNumber") and f"Lot {address['lotNumber']}",
-            address.get("streetName"),
-            address.get("streetType"),
-            address.get("streetSuffix"),
-            address.get("suburb"),
-            address.get("state"),
-            address.get("postcode")
+            address.get("flatOrUnitNumber"), address.get("houseNumber"),
+            address.get("streetName"), address.get("streetType"), address.get("streetSuffix"),
+            address.get("suburb"), address.get("state"), address.get("postcode")
         ]
-        full_addr = " ".join(p for p in addr_parts if p)
-
-        logger.info("[parse_discovery] nmi=%s  checksum=%s  house=%s  dpid=%s  address='%s'",
+        addr_str = " ".join(str(p) for p in addr_parts if p)
+        
+        logger.info("[parse_discovery] nmi=%s  checksum=%s  house=%s  dpid=%s  address=%s",
                     nmi_val, checksum_val,
                     address.get("houseNumber"), address.get("deliveryPointIdentifier"),
-                    full_addr)
+                    addr_str)
 
     # Fallback: no <NMIStandingData> wrapper (older schema)
     if not nmis:
@@ -437,7 +416,6 @@ def parse_detail_xml(xml_text):
     # ── Address ───────────────────────────────────────────────────────────────
     address = {
         "houseNumber":             find_in(block, "HouseNumber"),
-        "houseNumberSuffix":       find_in(block, "HouseNumberSuffix"),
         "flatOrUnitNumber":        find_in(block, "FlatOrUnitNumber"),
         "streetName":              find_in(block, "StreetName"),
         "streetType":              find_in(block, "StreetType"),
@@ -446,7 +424,6 @@ def parse_detail_xml(xml_text):
         "state":                   find_in(block, "StateOrTerritory"),
         "postcode":                find_in(block, "PostCode"),
         "deliveryPointIdentifier": find_in(block, "DeliveryPointIdentifier"),
-        "lotNumber":               find_in(block, "LotNumber"),
     }
 
     # ── Meters & registers ────────────────────────────────────────────────────
@@ -631,16 +608,7 @@ def nmi_lookup():
     Step 2: getNMIDetail  — called once per NMI in parallel for meter/register detail
     """
     t0   = time.monotonic()
-    raw_body = request.get_json(force=True) or {}
-
-    # Normalize keys for case-insensitivity
-    param_map = {p.lower(): p for p in DISCOVERY_ALLOWED_PARAMS}
-    body = {}
-    for k, v in raw_body.items():
-        if k.lower() in param_map:
-            body[param_map[k.lower()]] = v
-        else:
-            body[k] = v
+    body = request.get_json(force=True) or {}
 
     val_errs = validate_discovery_params(body)
     if val_errs:
@@ -675,39 +643,35 @@ def nmi_lookup():
                         "error": "Failed to parse NMIDiscovery XML", "detail": err}), 500
 
     nmi_list = disc.get("nmis", [])
-
-    # Local filtering to narrow down if AEMO returned too many results
-    if len(nmi_list) > 1:
-        req_house = str(body.get("houseNumber", "")).strip()
-        req_house_suffix = str(body.get("houseNumberSuffix", "")).strip()
-        if req_house:
-            filtered = []
-            for n in nmi_list:
-                if not n.get("address"):
-                    continue
-                addr_house = str(n["address"].get("houseNumber", "")).strip()
-                addr_suffix = str(n["address"].get("houseNumberSuffix", "")).strip()
-                
-                if addr_house == req_house:
-                    if req_house_suffix:
-                        if addr_suffix.upper() == req_house_suffix.upper():
-                            filtered.append(n)
-                    else:
-                        filtered.append(n)
+    
+    # ── Filter NMIs by exact house/unit match (MSATS can return broad results) ──
+    if nmi_list:
+        filtered_nmis = []
+        req_house = str(discovery_params.get("houseNumber") or "").strip().upper()
+        req_flat  = str(discovery_params.get("flatOrUnitNumber") or "").strip().upper()
+        
+        for entry in nmi_list:
+            addr = entry.get("address") or {}
+            act_house = str(addr.get("houseNumber") or "").strip().upper()
+            act_flat  = str(addr.get("flatOrUnitNumber") or "").strip().upper()
             
-            if filtered:
-                nmi_list = filtered
-
-        req_flat = str(body.get("flatOrUnitNumber", "")).strip()
-        if req_flat and len(nmi_list) > 1:
-            filtered = [n for n in nmi_list if n.get("address") and str(n["address"].get("flatOrUnitNumber", "")).strip() == req_flat]
-            if filtered:
-                nmi_list = filtered
+            match = True
+            if req_house and act_house and act_house != req_house:
+                match = False
+            if req_flat and act_flat and act_flat != req_flat:
+                match = False
+                
+            if match:
+                filtered_nmis.append(entry)
+                
+        if filtered_nmis and len(filtered_nmis) < len(nmi_list):
+            logger.info("[Step 1] Filtered NMIs from %d down to %d based on exact house/unit match", len(nmi_list), len(filtered_nmis))
+            nmi_list = filtered_nmis
 
     audit_record("step1_NMIDiscovery", transaction_id, discovery_params,
                  f"{BASE_URL}/NMIDiscovery", d_status,
                  {"nmisFound": len(nmi_list), "nmis": nmi_list}, None, step1_ms)
-    logger.info("[Step 1] OK  found %d NMI(s) after filtering  %.0fms", len(nmi_list), step1_ms)
+    logger.info("[Step 1] OK  found %d NMI(s)  %.0fms", len(nmi_list), step1_ms)
 
     # Reject if too many NMIs (ambiguous address)
     if len(nmi_list) > 5:
@@ -805,7 +769,8 @@ def nmi_lookup():
             )
             return {"nmi": entry.get("nmi"), "error": str(exc)}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(nmi_list), 5)) as pool:
+    workers = max(1, min(len(nmi_list), 5))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(fetch_detail, nmi_list))
 
     total_ms = (time.monotonic() - t0) * 1000
