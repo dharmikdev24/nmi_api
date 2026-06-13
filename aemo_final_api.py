@@ -330,6 +330,7 @@ def parse_discovery_xml(xml_text):
 
         address = {
             "houseNumber":             find_in(block, "HouseNumber"),
+            "houseNumberSuffix":       find_in(block, "HouseNumberSuffix"),
             "flatOrUnitNumber":        find_in(block, "FlatOrUnitNumber"),
             "streetName":              find_in(block, "StreetName"),
             "streetType":              find_in(block, "StreetType"),
@@ -416,6 +417,7 @@ def parse_detail_xml(xml_text):
     # ── Address ───────────────────────────────────────────────────────────────
     address = {
         "houseNumber":             find_in(block, "HouseNumber"),
+        "houseNumberSuffix":       find_in(block, "HouseNumberSuffix"),
         "flatOrUnitNumber":        find_in(block, "FlatOrUnitNumber"),
         "streetName":              find_in(block, "StreetName"),
         "streetType":              find_in(block, "StreetType"),
