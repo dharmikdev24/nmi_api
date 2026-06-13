@@ -476,6 +476,10 @@ def parse_detail_xml(xml_text):
                     if lt == "Status":     reg_status = val
 
                 if reg_id:
+                    if reg_status is not None and reg_status.upper() != "C":
+                        logger.debug("[parse_detail] skipping non-current register %s with status %s", reg_id, reg_status)
+                        continue
+
                     entry = {
                         "registerId":            reg_id,
                         "type":                  REGISTER_MEANINGS.get(reg_id, "Unknown"),
@@ -747,6 +751,11 @@ def nmi_lookup():
             merged_addr = {k: (detail_addr.get(k) or disc_addr.get(k))
                            for k in set(list(detail_addr.keys()) + list(disc_addr.keys()))}
 
+            # Check if any register has registerId "B1" → VPP / Battery site
+            has_b1 = any(
+                r.get("registerId") == "B1" for r in detail.get("registers", [])
+            )
+
             return {
                 "nmi":            nmi,
                 "checksum":       checksum,
@@ -759,6 +768,8 @@ def nmi_lookup():
                 },
                 "registers":      detail["registers"],
                 "controlledLoad": detail["controlledLoad"],
+                "meters":         detail.get("meters", []),
+                "isVppAndIsBattery": has_b1,
             }
 
         except Exception as exc:
@@ -885,12 +896,12 @@ def nmi_detail_raw():
     t0   = time.monotonic()
     body = request.get_json(force=True) or {}
 
-    missing = [f for f in ("transactionId", "nmi", "checksum")
+    missing = [f for f in ("nmi", "checksum")
                if not body.get(f) and body.get(f) != 0]
     if missing:
         return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
 
-    transaction_id = body["transactionId"]
+    transaction_id = body.get("transactionId") or str(uuid.uuid4())
     nmi            = str(body["nmi"])
     checksum       = str(body["checksum"])
 
